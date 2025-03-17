@@ -23,7 +23,12 @@ defmodule MindreCash.SimpleServer do
     # Get query parameter from URL
     query = conn.params["q"] || "mjölk"
     admin_key = System.get_env("ADMIN_KEY")
-    is_admin = conn.params["admin"] == admin_key
+
+    # Fix the admin check to handle undefined admin parameter
+    admin_param = conn.params["admin"]
+
+    is_admin =
+      admin_param != nil && admin_param == admin_key && admin_key != nil && admin_key != ""
 
     Logger.info("Processing request for query: #{query}, admin: #{is_admin}")
 
@@ -200,7 +205,7 @@ defmodule MindreCash.SimpleServer do
       ""
     else
       """
-      <div class="feedback feedback-warning">De #{count} billigaste varorna är gömda, men syns när du blir medlem.</div>
+      <p><div class="feedback feedback-warning">De #{count} billigaste varorna är gömda, men syns när du blir medlem.</div></p>
       """
     end
   end
@@ -312,21 +317,6 @@ defmodule MindreCash.SimpleServer do
       # Get the unit from the first product
       unit = (List.first(filtered_products) || %{})["unit"] || "st"
 
-      # Extract all prices with store names from the store map
-      all_prices =
-        filtered_products
-        |> Enum.flat_map(fn product ->
-          store_uuid = product["store_uuid"]
-          store_name = Map.get(store_map, store_uuid) || product["store"] || "Unknown"
-
-          [
-            %{
-              "store" => store_name,
-              "price" => product["item_price"] || 0
-            }
-          ]
-        end)
-
       # Find min and max unit prices - work with raw numbers
       min_unit_price =
         filtered_products
@@ -351,13 +341,19 @@ defmodule MindreCash.SimpleServer do
           "0"
         end
 
-      # Find store with lowest price
+      # Find store with lowest unit price
       cheapest_store =
         if is_admin do
-          all_prices
-          |> Enum.filter(fn price -> price["price"] == min_unit_price end)
-          |> Enum.at(0, %{})
-          |> Map.get("store", "")
+          # Find the store with the lowest unit price
+          lowest_unit_price_product =
+            filtered_products
+            |> Enum.min_by(
+              fn product -> product["unit_price"] || product["item_price"] || 0 end,
+              fn -> %{} end
+            )
+
+          store_uuid = lowest_unit_price_product["store_uuid"]
+          Map.get(store_map, store_uuid) || lowest_unit_price_product["store"] || "Unknown"
         else
           censor(12)
         end
@@ -412,35 +408,55 @@ defmodule MindreCash.SimpleServer do
       # Handle censoring for non-admin users
       {final_rows_with_raw_prices, censored_count} =
         if is_admin do
+          # Admin sees all rows
           {rows_with_raw_prices, 0}
         else
           # Calculate how many items to censor - half of the total
           count = floor(length(rows_with_raw_prices) / 2)
 
-          # Add a censored row and drop the first half of the rows
+          # For non-admin, only show the more expensive half (drop the cheapest half)
+          visible_rows = Enum.drop(rows_with_raw_prices, count)
+
+          # Create a single censored row to show at the top
           censored_row = %{
             marks: censor(2),
             title: censor(12),
             store: censor(8),
-            # Use 0 as placeholder
-            item_price: 0,
-            unit_price: 0,
+            # Use censor instead of 0
+            item_price: censor(6),
+            # Use censor instead of 0
+            unit_price: censor(6),
             unit: unit
           }
 
-          {[censored_row | Enum.drop(rows_with_raw_prices, count)], count}
+          # Add the censored row at the beginning of visible rows
+          {[censored_row] ++ visible_rows, count}
         end
 
       # NOW format the currency for display - at the very last step
       formatted_rows =
         Enum.map(final_rows_with_raw_prices, fn row ->
-          [
-            row.marks,
-            row.title,
-            row.store,
-            format_currency(row.item_price),
-            "#{format_currency(row.unit_price)}/#{row.unit}"
-          ]
+          # Special handling for censored row
+          if is_binary(row.item_price) && is_binary(row.unit_price) do
+            # This is our censored row, use the censored values directly
+            [
+              row.marks,
+              row.title,
+              row.store,
+              # Already censored
+              row.item_price,
+              "#{row.unit_price}/#{row.unit}"
+            ]
+          else
+            # Normal row with numeric values
+            [
+              row.marks,
+              row.title,
+              row.store,
+              format_currency(row.item_price),
+              "#{format_currency(row.unit_price)}/#{row.unit}"
+            ]
+          end
         end)
 
       # Return the formatted rows, savings data with formatted amount, and censored count
@@ -509,7 +525,7 @@ defmodule MindreCash.SimpleServer do
       case query do
         "smör" ->
           Enum.filter(items, fn item ->
-            !String.contains?(String.downcase(item["title"] || ""), "redbart")
+            !String.contains?(String.downcase(item["title"] || ""), "bredbart")
           end)
 
         "mjölk" ->
@@ -547,57 +563,7 @@ defmodule MindreCash.SimpleServer do
 
   defp render_logo do
     """
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1.41 16.09V20h-2.67v-1.93c-1.71-.36-3.16-1.46-3.27-3.4h1.96c.1 1.05.82 1.87 2.65 1.87 1.96 0 2.4-.98 2.4-1.59 0-.83-.44-1.61-2.67-2.14-2.48-.6-4.18-1.62-4.18-3.67 0-1.72 1.39-2.84 3.11-3.21V4h2.67v1.95c1.86.45 2.79 1.86 2.85 3.39H14.3c-.05-1.11-.64-1.87-2.22-1.87-1.5 0-2.4.68-2.4 1.64 0 .84.65 1.39 2.67 1.91s4.18 1.39 4.18 3.91c-.01 1.83-1.38 2.83-3.12 3.16z"/>
-    </svg>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14,18a1,1,0,0,0,1-1V15a1,1,0,0,0-2,0v2A1,1,0,0,0,14,18Zm-4,0a1,1,0,0,0,1-1V15a1,1,0,0,0-2,0v2A1,1,0,0,0,10,18ZM19,6H17.62L15.89,2.55a1,1,0,1,0-1.78.9L15.38,6H8.62L9.89,3.45a1,1,0,0,0-1.78-.9L6.38,6H5a3,3,0,0,0-.92,5.84l.74,7.46a3,3,0,0,0,3,2.7h8.38a3,3,0,0,0,3-2.7l.74-7.46A3,3,0,0,0,19,6ZM17.19,19.1a1,1,0,0,1-1,.9H7.81a1,1,0,0,1-1-.9L6.1,12H17.9ZM19,10H5A1,1,0,0,1,5,8H19a1,1,0,0,1,0,2Z"></path></svg>
     """
-  end
-
-  # Add this function to transform the API data to match the TypeScript structure
-  defp transform_api_data(data) do
-    Logger.info("Transforming API data")
-
-    # This should match the structure expected by the TypeScript code
-    case data do
-      items when is_list(items) ->
-        Enum.map(items, fn item ->
-          # Extract the title/name
-          title = Map.get(item, "title") || Map.get(item, "name") || "Unknown"
-
-          # Extract store and price information
-          store_uuid = Map.get(item, "store_uuid")
-          store_name = Map.get(item, "store_name") || Map.get(item, "store") || "Unknown"
-
-          item_price = Map.get(item, "item_price") || Map.get(item, "price") || 0
-          unit_price = Map.get(item, "unit_price") || item_price
-
-          # Extract other metadata
-          unit = Map.get(item, "unit") || "st"
-          organic = Map.get(item, "organic") || false
-          country_of_origin = Map.get(item, "country_of_origin") || ""
-
-          %{
-            "title" => title,
-            "name" => title,
-            "store_uuid" => store_uuid,
-            "store" => store_name,
-            "item_price" => item_price,
-            "unit_price" => unit_price,
-            "unit" => unit,
-            "organic" => organic,
-            "country_of_origin" => country_of_origin,
-            # Add the prices array to match the expected structure
-            "prices" => [
-              %{
-                "store" => store_name,
-                "price" => item_price
-              }
-            ]
-          }
-        end)
-
-      _ ->
-        []
-    end
   end
 end
